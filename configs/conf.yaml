@@ -1,0 +1,4 @@
+grid:
+  rows: 3
+  cols: 4
+update_frequency: 10
