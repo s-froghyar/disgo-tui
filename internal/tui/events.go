@@ -77,18 +77,18 @@ func (t *TUI) handlePreviewNavigation(k tcell.Key) {
 	switch k {
 	case tcell.KeyUp:
 		if potentialPosition[0] > 0 {
-			potentialPosition[0] -= NumOfRows
+			potentialPosition[0] -= t.Config.Grid.NumOfRows
 		}
 	case tcell.KeyDown:
-		if potentialPosition[0] < NumOfRows-1 {
-			potentialPosition[0] += NumOfRows
+		if potentialPosition[0] < t.Config.Grid.NumOfRows-1 {
+			potentialPosition[0] += t.Config.Grid.NumOfRows
 		}
 	case tcell.KeyLeft:
 		if potentialPosition[1] > 0 {
 			potentialPosition[1]--
 		}
 	case tcell.KeyRight:
-		if potentialPosition[1] < NumOfCols-1 {
+		if potentialPosition[1] < t.Config.Grid.NumOfCols-1 {
 			potentialPosition[1]++
 		}
 	}

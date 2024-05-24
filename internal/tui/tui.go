@@ -16,12 +16,6 @@ type (
 	KeyOp int16
 )
 
-const (
-	// Number of columns in preview grid.
-	NumOfCols = 3
-	NumOfRows = 2
-)
-
 var (
 	MenuTitle    = fmt.Sprintf("Menu [ %s ]", tcell.KeyNames[KeyMapping[KeyMenuOp]])
 	PreviewTitle = fmt.Sprintf("Preview [ %s ]", tcell.KeyNames[KeyMapping[KeyPreviewOp]])
@@ -279,8 +273,8 @@ func (t *TUI) DrawPreviewGrid() {
 			cards = t.OrderPrims
 		}
 		for i := range len(cards) {
-			row := i / NumOfCols
-			column := i % NumOfCols
+			row := i / t.Config.Grid.NumOfCols
+			column := i % t.Config.Grid.NumOfCols
 
 			t.Preview.AddItem(cards[i], row, column, 1, 1, 0, 0, false)
 		}
