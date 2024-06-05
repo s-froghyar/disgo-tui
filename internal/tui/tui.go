@@ -21,7 +21,7 @@ var (
 	PreviewTitle = fmt.Sprintf("Preview [ %s ]", tcell.KeyNames[KeyMapping[KeyPreviewOp]])
 
 	// TitleFooterView is the title for Footer view.
-	FooterText = "Navigate [ Tab / Shift-Tab ] · Exit [ Ctrl-C ] \n Preview specific: Describe [ e ] "
+	FooterText = "Navigate: Arrow keys [Up, Down, Right, Left] · Preview specific: Return [ Enter ] · Exit [ Ctrl-C ]"
 )
 
 type TUI struct {
@@ -29,6 +29,7 @@ type TUI struct {
 	Config *configs.AppConfig
 
 	App        *tview.Application
+	Pages      *tview.Pages
 	Grid       *tview.Grid
 	Navigation *tview.List
 	Footer     *tview.TextView
@@ -83,6 +84,8 @@ func New(c *client.DiscogsClient, config *configs.AppConfig) *TUI {
 		AddItem(t.Preview, 0, 1, 1, 1, 0, 0, false).
 		AddItem(t.Footer, 1, 0, 1, 2, 0, 0, false)
 
+	t.Pages = tview.NewPages().AddPage("main", t.Grid, true, true)
+
 	t.setUpInputCaptures()
 
 	// Load real data
@@ -116,7 +119,7 @@ func (t *TUI) Start() error {
 		}
 	}()
 
-	return t.App.SetRoot(t.Grid, true).EnableMouse(true).Run()
+	return t.App.SetRoot(t.Pages, true).EnableMouse(true).Run()
 }
 
 // Stop stops terminal user interface application.
@@ -182,6 +185,8 @@ func (t *TUI) LoadData() error {
 			t.showError(err)
 		}
 		collectionCards[i].SetTitle(model.Title)
+		collectionCards[i].SetInputCapture(t.openReleaseModal)
+
 	}
 	t.CollectionPrims = collectionCards
 

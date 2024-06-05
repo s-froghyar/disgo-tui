@@ -2,21 +2,22 @@ package tui
 
 import (
 	"github.com/gdamore/tcell/v2"
+	"github.com/rivo/tview"
 	"github.com/s-froghyar/disgo-tui/internal/client"
 )
 
 func (t *TUI) sourceSelected(_ int, _ string, _ string, shortcut rune) {
-	var source client.DataSource
 	switch shortcut {
 	case '0':
-		source = client.CollectionSource
+		t.SelectedSource = client.CollectionSource
 	case '1':
-		source = client.WishlistSource
+		t.SelectedSource = client.WishlistSource
 	case '2':
-		source = client.OrdersSource
+		t.SelectedSource = client.OrdersSource
+	case 'q':
+		return
 	}
 
-	t.SelectedSource = source
 	t.PreviewPosition = [2]int{0, 0}
 	t.DrawPreviewGrid()
 }
@@ -24,13 +25,20 @@ func (t *TUI) sourceSelected(_ int, _ string, _ string, shortcut rune) {
 func (t *TUI) focusOnPreview(src client.DataSource) func() {
 	return func() {
 		t.queueUpdateDraw(func() {
+			t.App.SetFocus(t.Preview)
 			switch src {
 			case client.CollectionSource:
-				t.App.SetFocus(t.CollectionPrims[0])
+				if len(t.CollectionPrims) > 0 {
+					t.App.SetFocus(t.CollectionPrims[0])
+				}
 			case client.WishlistSource:
-				t.App.SetFocus(t.WishlistPrims[0])
+				if len(t.WishlistPrims) > 0 {
+					t.App.SetFocus(t.WishlistPrims[0])
+				}
 			case client.OrdersSource:
-				t.App.SetFocus(t.OrderPrims[0])
+				if len(t.OrderPrims) > 0 {
+					t.App.SetFocus(t.OrderPrims[0])
+				}
 			}
 		})
 	}
@@ -63,7 +71,6 @@ func (t *TUI) setUpInputCaptures() {
 		// preview navigation
 		case tcell.KeyUp, tcell.KeyDown, tcell.KeyLeft, tcell.KeyRight:
 			t.handlePreviewNavigation(event.Key())
-
 		}
 		return event
 	})
@@ -124,4 +131,22 @@ func (t *TUI) handlePreviewNavigation(k tcell.Key) {
 	if !overstep {
 		t.PreviewPosition = potentialPosition
 	}
+}
+
+func (t *TUI) openReleaseModal(key *tcell.EventKey) *tcell.EventKey {
+	switch key.Key() {
+	case tcell.KeyEnter:
+		infobox := tview.NewModal().
+			AddButtons([]string{"Close"}).
+			SetDoneFunc(func(_ int, _ string) {
+				t.Pages.SwitchToPage("main")
+				t.App.SetFocus(t.Preview)
+				t.handlePreviewNavigation(tcell.KeyEnd)
+			}).
+			SetText("Lorem Ipsum Is A Pain")
+
+		t.Pages.AddAndSwitchToPage("modal", infobox, true)
+
+	}
+	return key
 }

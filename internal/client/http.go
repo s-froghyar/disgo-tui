@@ -92,8 +92,6 @@ func New() *DiscogsClient {
 
 func generateDiscogsToken() {
 	localPort = os.Getenv("LOCAL_PORT")
-	fmt.Printf("Consumer Key: %s\n", consumerKey)
-	fmt.Printf("Consumer Secret Key: %s\n", consumerSecretKey)
 
 	config = oauth1.Config{
 		ConsumerKey:    consumerKey,
@@ -178,11 +176,11 @@ func handleRedirect(w http.ResponseWriter, r *http.Request) {
 	to save your auth token as an env variable:
 
 	// .zshrc
-	echo 'export DISCOGS_TOKEN="%v"' >> ~/.zshrc
-	echo 'export DISCOGS_TOKEN_SECRET="%v"' >> ~/.zshrc
+	export DISCOGS_TOKEN="%v"
+	export DISCOGS_TOKEN_SECRET="%v"
 	// .bashrc
-	echo 'export DISCOGS_TOKEN="%v"' >> ~/.bashrc
-	echo 'export DISCOGS_TOKEN_SECRET="%v"' >> ~/.bashrc
+	export DISCOGS_TOKEN="%v"
+	export DISCOGS_TOKEN_SECRET="%v"
 	`, token.Token, token.TokenSecret, token.Token, token.TokenSecret)
 
 	w.WriteHeader(http.StatusOK)
