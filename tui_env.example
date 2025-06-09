@@ -1,0 +1,13 @@
+#!/bin/bash
+
+# Environment Variables Export Script
+# Usage: source ./tui_env.sh or . ./tui_env.sh
+
+# Discogs consumer keys
+export DISCOGS_API_CONSUMER_KEY=
+export DISCOGS_API_CONSUMER_SECRET=
+
+# Redirect url handler (auth use of port max 5mins till timeout)
+export LOCAL_PORT=8081
+
+echo "Environment variables loaded successfully"

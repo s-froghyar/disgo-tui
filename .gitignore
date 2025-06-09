@@ -21,3 +21,4 @@
 go.work
 *.png
 .env
+tui_env.sh
