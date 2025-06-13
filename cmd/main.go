@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"time"
@@ -11,59 +12,69 @@ import (
 	"github.com/s-froghyar/disgo-tui/internal/tui"
 )
 
+// Build-time variable (set via -ldflags)
+var version = "dev"
+
 func main() {
+	// Handle version flag
+	if len(os.Args) > 1 && (os.Args[1] == "--version" || os.Args[1] == "-v") {
+		fmt.Printf("Discogs TUI %s\n", version)
+		fmt.Println("A terminal interface for your Discogs collection")
+		fmt.Println("https://github.com/s-froghyar/disgo-tui")
+		return
+	}
+
+	// Handle help flag
+	if len(os.Args) > 1 && (os.Args[1] == "--help" || os.Args[1] == "-h") {
+		fmt.Printf("Discogs TUI %s\n\n", version)
+		fmt.Println("A terminal interface for your Discogs collection")
+		fmt.Println("")
+		fmt.Println("USAGE:")
+		fmt.Println("  disgo-tui [FLAGS]")
+		fmt.Println("")
+		fmt.Println("FLAGS:")
+		fmt.Println("  -h, --help     Show this help message")
+		fmt.Println("  -v, --version  Show version information")
+		fmt.Println("")
+		fmt.Println("GETTING STARTED:")
+		fmt.Println("  1. Run 'disgo-tui' to start the application")
+		fmt.Println("  2. Authenticate with your Discogs account when prompted")
+		fmt.Println("  3. Browse your collection using keyboard navigation")
+		fmt.Println("")
+		fmt.Println("NAVIGATION:")
+		fmt.Println("  Ctrl+A        Focus menu")
+		fmt.Println("  Ctrl+D        Focus grid")
+		fmt.Println("  Arrow Keys    Navigate items")
+		fmt.Println("  Enter         Open details")
+		fmt.Println("  0,1,2         Switch views (Collection, Wishlist, Orders)")
+		fmt.Println("  q             Quit")
+		fmt.Println("")
+		fmt.Println("For more information, visit:")
+		fmt.Println("https://github.com/s-froghyar/disgo-tui")
+		return
+	}
+
 	// Load configuration
 	c, err := configs.LoadConfig()
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
-	// Check required environment variables
-	requiredEnvVars := []string{
-		"DISCOGS_API_CONSUMER_KEY",
-		"DISCOGS_API_CONSUMER_SECRET",
-		"LOCAL_PORT",
-	}
-
-	missing := false
-	for _, envVar := range requiredEnvVars {
-		if os.Getenv(envVar) == "" {
-			log.Printf("Missing required environment variable: %s", envVar)
-			missing = true
-		}
-	}
-
-	if missing {
-		log.Fatal(`
-Required environment variables missing. Please set:
-- DISCOGS_API_CONSUMER_KEY: Your Discogs API consumer key
-- DISCOGS_API_CONSUMER_SECRET: Your Discogs API consumer secret  
-- LOCAL_PORT: Port for OAuth callback (e.g., 8080)
-
-You can get API credentials from: https://www.discogs.com/settings/developers`)
-	}
-
-	log.Println("Starting Discogs TUI...")
-	log.Printf("OAuth callback will use port: %s", os.Getenv("LOCAL_PORT"))
+	fmt.Printf("🎵 Discogs TUI %s\n", version)
 
 	// Create context with timeout for client initialization
-	// Give plenty of time for OAuth flow
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
-	// Create Discogs client with context support
-	log.Println("Initializing Discogs client...")
+	// Create Discogs client
 	httpClient, err := client.NewWithContext(ctx)
 	if err != nil {
-		log.Fatalf("Failed to create Discogs client: %v", err)
+		log.Fatalf("Failed to initialize Discogs client: %v", err)
 	}
 
-	log.Println("✓ Discogs client ready!")
-
-	// Create TUI
-	log.Println("Starting TUI application...")
+	// Create and start TUI
 	tuiApp := tui.New(httpClient, c)
 	if err = tuiApp.Start(); err != nil {
-		log.Fatalf("Failed to start TUI: %v", err)
+		log.Fatalf("TUI error: %v", err)
 	}
 }

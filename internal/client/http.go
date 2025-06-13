@@ -12,26 +12,33 @@ import (
 	"image"
 	"image/jpeg"
 	"io"
+	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"time"
 
 	"github.com/dghubble/oauth1"
 	"github.com/dghubble/oauth1/discogs"
-	"github.com/joho/godotenv"
+)
+
+// Build-time variables (set during compilation)
+var (
+	// These will be set via -ldflags during build in CI/CD
+	defaultConsumerKey    = ""
+	defaultConsumerSecret = ""
+	version               = "dev"
 )
 
 const (
 	defaultTimeout = 30 * time.Second
 	configFileName = "discogs_tui_config.enc"
+	defaultPort    = "8080"
 )
 
 var (
-	ErrMissingConsumerKey    = errors.New("DISCOGS_API_CONSUMER_KEY environment variable is required")
-	ErrMissingConsumerSecret = errors.New("DISCOGS_API_CONSUMER_SECRET environment variable is required")
-	ErrMissingLocalPort      = errors.New("LOCAL_PORT environment variable is required")
-	ErrInvalidLocalPort      = errors.New("LOCAL_PORT must be a valid port number")
 	ErrTokenGenerationFailed = errors.New("failed to generate OAuth token")
 )
 
@@ -62,47 +69,65 @@ type DiscogsClient struct {
 	handlingRedirect  bool
 	doneVerifying     bool
 	token             *oauth1.Token
-
-	// Add this field for OAuth completion signaling
-	oauthComplete chan error
+	oauthComplete     chan error
 }
 
 type customTransport struct {
 	Transport http.RoundTripper
-	client    *DiscogsClient // Reference to client for accessing token/keys
+	client    *DiscogsClient
 }
 
-// RoundTrip implements the RoundTripper interface to add the necessary headers for the Discogs API
 func (t *customTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if t.client.token == nil {
 		return nil, errors.New("no OAuth token available")
 	}
 
 	ts := time.Now().Unix()
+	req.Header.Set("User-Agent", fmt.Sprintf("DiscosTUI/%s", version))
 	req.Header.Set("Authorization", fmt.Sprintf(`OAuth oauth_consumer_key="%v",oauth_nonce="%v",oauth_token="%v",oauth_signature="%v&%v",oauth_signature_method="PLAINTEXT",oauth_timestamp="%v"`,
 		t.client.consumerKey, ts, t.client.token.Token, t.client.consumerSecretKey, t.client.token.TokenSecret, ts))
 
 	return t.Transport.RoundTrip(req)
 }
 
-// validateConfig validates that all required configuration is present and valid
+// validateConfig validates that all required configuration is present
 func (c *DiscogsClient) validateConfig() error {
 	if c.consumerKey == "" {
-		return ErrMissingConsumerKey
+		return errors.New("no API credentials available - this appears to be a development build")
 	}
 	if c.consumerSecretKey == "" {
-		return ErrMissingConsumerSecret
+		return errors.New("incomplete API credentials - this appears to be a development build")
 	}
-	if c.localPort == "" {
-		return ErrMissingLocalPort
-	}
-
-	// Basic port validation (should be numeric and reasonable range)
-	if len(c.localPort) < 1 || len(c.localPort) > 5 {
-		return ErrInvalidLocalPort
-	}
-
 	return nil
+}
+
+// getAvailablePort finds an available port for the OAuth callback
+func getAvailablePort() string {
+	// Try default port first
+	if isPortAvailable(defaultPort) {
+		return defaultPort
+	}
+
+	// Try some common ports
+	commonPorts := []string{"8081", "8082", "8083", "8084", "8085"}
+	for _, port := range commonPorts {
+		if isPortAvailable(port) {
+			return port
+		}
+	}
+
+	// Fall back to default and let the OS handle conflicts
+	return defaultPort
+}
+
+func isPortAvailable(port string) bool {
+	// Simple check - try to listen on the port briefly
+	listener, err := net.Listen("tcp", ":"+port)
+	if err != nil {
+		return false
+	}
+	listener.Close()
+	return true
 }
 
 // New returns an authenticated http.Client for the Discogs API
@@ -112,87 +137,74 @@ func New() (*DiscogsClient, error) {
 
 // NewWithContext returns an authenticated http.Client for the Discogs API with context support
 func NewWithContext(ctx context.Context) (*DiscogsClient, error) {
-	// Load environment variables
-	err := godotenv.Load()
-	if err != nil {
-		fmt.Println("Warning: Error loading .env file, using system environment variables")
-	}
-
 	c := &DiscogsClient{
 		Client: &http.Client{
 			Timeout: defaultTimeout,
 		},
 	}
 
-	// Initialize client fields from environment
+	// Initialize API credentials
+	// Priority: 1. Environment variables (for development)
+	//          2. Build-time embedded credentials (for releases)
 	c.consumerKey = os.Getenv("DISCOGS_API_CONSUMER_KEY")
 	c.consumerSecretKey = os.Getenv("DISCOGS_API_CONSUMER_SECRET")
+
+	if c.consumerKey == "" && defaultConsumerKey != "" {
+		c.consumerKey = defaultConsumerKey
+		c.consumerSecretKey = defaultConsumerSecret
+		fmt.Println("Using embedded API credentials")
+	}
+
+	// Set OAuth callback port
 	c.localPort = os.Getenv("LOCAL_PORT")
+	if c.localPort == "" {
+		c.localPort = getAvailablePort()
+	}
 
 	// Validate configuration
 	if err := c.validateConfig(); err != nil {
 		return nil, err
 	}
 
-	fmt.Println("Looking for existing OAuth tokens...")
+	fmt.Println("🎵 Welcome to Discogs TUI!")
+	fmt.Println("Looking for existing authentication...")
 
-	// Try to load existing tokens from secure storage first
+	// Try to load existing tokens from secure storage
 	savedToken, err := c.loadTokensSecurely()
 	if err == nil && savedToken != nil {
 		c.token = savedToken
-		fmt.Println("✓ Loaded existing OAuth tokens from secure storage")
+		fmt.Println("✓ Found existing authentication")
 	} else {
-		fmt.Printf("Secure storage unavailable (%v), checking environment variables...\n", err)
+		fmt.Println("No existing authentication found")
+		fmt.Println("Starting Discogs authentication...")
+		fmt.Println("This is a one-time setup - your credentials will be saved securely")
 
-		// Fall back to environment variables
-		t := os.Getenv("DISCOGS_TOKEN")
-		s := os.Getenv("DISCOGS_TOKEN_SECRET")
+		// Generate new tokens via OAuth
+		err := c.generateDiscogsTokenWithContext(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrTokenGenerationFailed, err)
+		}
 
-		if t != "" && s != "" {
-			c.token = &oauth1.Token{
-				Token:       t,
-				TokenSecret: s,
-			}
-			fmt.Println("✓ Loaded OAuth tokens from environment variables")
-
-			// Save to secure storage for future use
-			if err := c.saveTokensSecurely(); err != nil {
-				fmt.Printf("Warning: Failed to save tokens securely: %v\n", err)
-			} else {
-				fmt.Println("✓ Saved tokens to secure storage for future use")
-			}
+		// Save newly generated tokens
+		if err := c.saveTokensSecurely(); err != nil {
+			fmt.Printf("Warning: Failed to save authentication securely: %v\n", err)
 		} else {
-			fmt.Println("No existing tokens found, starting OAuth flow...")
-
-			// Generate new tokens
-			err := c.generateDiscogsTokenWithContext(ctx)
-			if err != nil {
-				return nil, fmt.Errorf("%w: %v", ErrTokenGenerationFailed, err)
-			}
-
-			// Save newly generated tokens
-			if err := c.saveTokensSecurely(); err != nil {
-				fmt.Printf("Warning: Failed to save tokens securely: %v\n", err)
-				fmt.Println("You can manually save these tokens to avoid re-authentication:")
-				c.printTokensToConsole()
-			} else {
-				fmt.Println("✓ OAuth tokens saved securely - you won't need to re-authenticate next time!")
-			}
+			fmt.Println("✓ Authentication saved securely - you won't need to re-authenticate!")
 		}
 	}
 
-	// Set up custom transport with reference to client
+	// Set up custom transport
 	c.Transport = &customTransport{
 		Transport: http.DefaultTransport,
 		client:    c,
 	}
 
-	fmt.Println("Verifying authentication with Discogs API...")
+	fmt.Println("Verifying authentication with Discogs...")
 	err = c.getIdentityWithContext(ctx)
 	if err != nil {
 		// If auth fails, token might be invalid - try to re-authenticate
-		fmt.Printf("Authentication failed: %v\n", err)
-		fmt.Println("Tokens may be invalid, starting fresh OAuth flow...")
+		fmt.Printf("Authentication verification failed: %v\n", err)
+		fmt.Println("Re-authenticating...")
 
 		// Clear invalid tokens
 		c.token = nil
@@ -205,22 +217,22 @@ func NewWithContext(ctx context.Context) (*DiscogsClient, error) {
 
 		// Save new tokens
 		if err := c.saveTokensSecurely(); err != nil {
-			fmt.Printf("Warning: Failed to save tokens securely: %v\n", err)
-			c.printTokensToConsole()
+			fmt.Printf("Warning: Failed to save authentication: %v\n", err)
 		}
 
 		// Verify again
 		err = c.getIdentityWithContext(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("authentication still failing after re-auth: %w", err)
+			return nil, fmt.Errorf("authentication still failing: %w", err)
 		}
 	}
 
-	fmt.Printf("✓ Successfully authenticated as user: %v\n", c.Identity.Username)
+	fmt.Printf("✓ Successfully authenticated as: %v\n", c.Identity.Username)
+	fmt.Println("Loading your Discogs data...")
 	return c, nil
 }
 
-// generateDiscogsTokenWithContext generates OAuth tokens with context support for timeouts
+// generateDiscogsTokenWithContext generates OAuth tokens with context support
 func (c *DiscogsClient) generateDiscogsTokenWithContext(ctx context.Context) error {
 	c.config = oauth1.Config{
 		ConsumerKey:    c.consumerKey,
@@ -229,10 +241,10 @@ func (c *DiscogsClient) generateDiscogsTokenWithContext(ctx context.Context) err
 		Endpoint:       discogs.Endpoint,
 	}
 
-	// Get request token with context
+	// Get request token
 	token, secret, err := c.config.RequestToken()
 	if err != nil {
-		return fmt.Errorf("error at RequestToken: %w", err)
+		return fmt.Errorf("failed to get request token: %w", err)
 	}
 
 	c.requestToken = token
@@ -240,74 +252,95 @@ func (c *DiscogsClient) generateDiscogsTokenWithContext(ctx context.Context) err
 
 	authorizationUrl, err := c.config.AuthorizationURL(c.requestToken)
 	if err != nil {
-		return fmt.Errorf("error at AuthorizationURL: %w", err)
+		return fmt.Errorf("failed to get authorization URL: %w", err)
 	}
 
-	// Initialize the completion channel
+	// Initialize completion channel
 	c.oauthComplete = make(chan error, 1)
 
-	// Create a server with context
+	// Create OAuth callback server
 	server := &http.Server{
 		Addr:    ":" + c.localPort,
 		Handler: http.HandlerFunc(c.handleRedirect),
 	}
 
-	// Start the server in a goroutine
+	// Start server
 	go func() {
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			// Only send error if OAuth hasn't completed yet
 			select {
-			case c.oauthComplete <- fmt.Errorf("error starting server: %w", err):
+			case c.oauthComplete <- fmt.Errorf("server error: %w", err):
 			default:
-				// Channel already closed or has a value
 			}
 		}
 	}()
 
-	fmt.Printf("Authorization URL: %v\n", authorizationUrl.String())
-	fmt.Println("Please verify yourself! if you are not redirected, please visit the link above")
-	fmt.Println("Waiting for OAuth completion...")
+	// Open browser automatically if possible
+	fmt.Printf("\n🔐 Please authenticate with Discogs:\n")
+	fmt.Printf("   %s\n\n", authorizationUrl.String())
 
-	// Wait for either context cancellation, OAuth completion, or timeout
+	if err := openBrowser(authorizationUrl.String()); err == nil {
+		fmt.Println("✓ Opened authentication page in your browser")
+	} else {
+		fmt.Println("Please copy the URL above into your browser")
+	}
+
+	fmt.Printf("Waiting for authentication (listening on port %s)...\n", c.localPort)
+
+	// Wait for completion
 	select {
 	case <-ctx.Done():
 		server.Close()
 		return ctx.Err()
 	case err := <-c.oauthComplete:
-		// OAuth completed (either successfully or with error)
 		server.Close()
 		if err != nil {
 			return err
 		}
-		fmt.Println("OAuth completed successfully!")
+		fmt.Println("✓ Authentication successful!")
 		return nil
-	case <-time.After(5 * time.Minute): // 5 minute timeout for OAuth flow
+	case <-time.After(5 * time.Minute):
 		server.Close()
-		return errors.New("OAuth flow timed out after 5 minutes")
+		return errors.New("authentication timed out after 5 minutes")
 	}
+}
+
+// openBrowser attempts to open the URL in the user's default browser
+func openBrowser(url string) error {
+	var cmd string
+	var args []string
+
+	switch runtime.GOOS {
+	case "windows":
+		cmd = "cmd"
+		args = []string{"/c", "start"}
+	case "darwin":
+		cmd = "open"
+	default: // "linux", "freebsd", "openbsd", "netbsd"
+		cmd = "xdg-open"
+	}
+	args = append(args, url)
+
+	exec := exec.Command(cmd, args...)
+	return exec.Start()
 }
 
 func (c *DiscogsClient) handleRedirect(w http.ResponseWriter, r *http.Request) {
 	if c.handlingRedirect || c.doneVerifying {
 		w.WriteHeader(http.StatusBadRequest)
-		_, err := w.Write([]byte("Already handling a request"))
-		if err != nil {
-			fmt.Println("Error writing response:", err)
-		}
+		w.Write([]byte("Authentication already in progress"))
 		return
 	}
+
 	c.handlingRedirect = true
 	defer func() { c.handlingRedirect = false }()
 
-	var verificationCode string
-	queryParams := r.URL.Query()
+	// Get OAuth parameters
+	receivedToken := r.URL.Query().Get("oauth_token")
+	verificationCode := r.URL.Query().Get("oauth_verifier")
 
-	// Validate OAuth token matches
-	receivedToken := queryParams.Get("oauth_token")
+	// Validate token
 	if receivedToken != c.requestToken {
-		fmt.Printf("Token mismatch: expected %s, got %s\n", c.requestToken, receivedToken)
 		http.Error(w, "Invalid OAuth token", http.StatusBadRequest)
-		// Signal error
 		select {
 		case c.oauthComplete <- errors.New("invalid OAuth token"):
 		default:
@@ -315,20 +348,9 @@ func (c *DiscogsClient) handleRedirect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	verificationCode = queryParams.Get("oauth_verifier")
-
-	// Debug logging
-	for key, values := range queryParams {
-		for _, value := range values {
-			fmt.Printf("Query parameter %s has value %s\n", key, value)
-		}
-	}
-
-	// Validate that we have the verification code
+	// Validate verification code
 	if verificationCode == "" {
-		fmt.Println("No verification code received")
-		http.Error(w, "No verification code", http.StatusBadRequest)
-		// Signal error
+		http.Error(w, "No verification code received", http.StatusBadRequest)
 		select {
 		case c.oauthComplete <- errors.New("no verification code received"):
 		default:
@@ -336,13 +358,10 @@ func (c *DiscogsClient) handleRedirect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// use request token to get access token
-	fmt.Printf("Verification Code: %v\n", verificationCode)
+	// Exchange for access token
 	accessToken, accessSecret, err := c.config.AccessToken(c.requestToken, c.requestSecret, verificationCode)
 	if err != nil {
-		fmt.Printf("Error at AccessToken: %v\n", err)
 		http.Error(w, "Failed to get access token", http.StatusInternalServerError)
-		// Signal error
 		select {
 		case c.oauthComplete <- fmt.Errorf("failed to get access token: %w", err):
 		default:
@@ -351,24 +370,44 @@ func (c *DiscogsClient) handleRedirect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	c.token = oauth1.NewToken(accessToken, accessSecret)
-
-	w.WriteHeader(http.StatusOK)
-	_, err = w.Write([]byte("Authentication successful! You can close this window."))
-	if err != nil {
-		fmt.Println("Error writing response:", err)
-	}
-
 	c.doneVerifying = true
 
-	// Signal successful completion
+	// Send success response
+	w.Header().Set("Content-Type", "text/html")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`
+		<!DOCTYPE html>
+		<html>
+		<head>
+			<title>Discogs TUI - Authentication Successful</title>
+			<style>
+				body { font-family: system-ui, sans-serif; text-align: center; padding: 50px; background: #f5f5f5; }
+				.container { background: white; border-radius: 10px; padding: 40px; max-width: 500px; margin: 0 auto; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+				.success { color: #28a745; font-size: 24px; margin-bottom: 20px; }
+				.message { color: #6c757d; font-size: 16px; }
+			</style>
+		</head>
+		<body>
+			<div class="container">
+				<div class="success">✓ Authentication Successful!</div>
+				<div class="message">
+					You can now close this window and return to your terminal.<br>
+					Discogs TUI is ready to use!
+				</div>
+			</div>
+		</body>
+		</html>
+	`))
+
+	// Signal completion
 	select {
-	case c.oauthComplete <- nil: // nil means success
-		fmt.Println("OAuth completion signaled successfully")
+	case c.oauthComplete <- nil:
 	default:
-		fmt.Println("OAuth completion channel already closed or full")
 	}
 }
 
+// Rest of the file remains the same (token storage, crypto functions, etc.)
+// ... [include all the existing token storage, encryption, and API methods]
 // getConfigDir returns the user's config directory
 func (c *DiscogsClient) getConfigDir() (string, error) {
 	configDir, err := os.UserConfigDir()
