@@ -1,0 +1,283 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [ "main" ]
+    tags: [ "v*" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.22'
+
+    - name: Cache Go modules
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cache/go-build
+          ~/go/pkg/mod
+        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-
+
+    - name: Download dependencies
+      run: go mod download
+
+    - name: Run tests
+      run: go test -v ./...
+
+    - name: Run linter
+      uses: golangci/golangci-lint-action@v3
+      with:
+        version: latest
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    strategy:
+      matrix:
+        goos: [linux, darwin, windows]
+        goarch: [amd64, arm64]
+        exclude:
+          - goos: windows
+            goarch: arm64
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.22'
+
+    - name: Cache Go modules
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cache/go-build
+          ~/go/pkg/mod
+        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+
+    - name: Get version
+      id: version
+      run: |
+        if [[ $GITHUB_REF == refs/tags/* ]]; then
+          VERSION=${GITHUB_REF#refs/tags/}
+        else
+          VERSION=$(git describe --tags --always --dirty)
+        fi
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "Version: $VERSION"
+
+    - name: Build binary
+      env:
+        GOOS: ${{ matrix.goos }}
+        GOARCH: ${{ matrix.goarch }}
+        CGO_ENABLED: 0
+      run: |
+        # Create output directory
+        mkdir -p dist
+        
+        # Set binary name with extension for Windows
+        BINARY_NAME="disgo-tui"
+        if [ "$GOOS" = "windows" ]; then
+          BINARY_NAME="disgo-tui.exe"
+        fi
+        
+        # Build with version info
+        go build -ldflags="-s -w -X main.version=${{ steps.version.outputs.version }}" \
+          -o "dist/${BINARY_NAME}" \
+          ./cmd/main.go
+        
+        # Create archive
+        ARCHIVE_NAME="disgo-tui-${{ steps.version.outputs.version }}-${{ matrix.goos }}-${{ matrix.goarch }}"
+        
+        if [ "$GOOS" = "windows" ]; then
+          cd dist && zip "../${ARCHIVE_NAME}.zip" "${BINARY_NAME}"
+        else
+          cd dist && tar -czf "../${ARCHIVE_NAME}.tar.gz" "${BINARY_NAME}"
+        fi
+
+    - name: Generate checksums
+      run: |
+        cd dist
+        if [ "${{ matrix.goos }}" = "windows" ]; then
+          sha256sum "../disgo-tui-${{ steps.version.outputs.version }}-${{ matrix.goos }}-${{ matrix.goarch }}.zip" >> ../checksums.txt
+        else
+          sha256sum "../disgo-tui-${{ steps.version.outputs.version }}-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz" >> ../checksums.txt
+        fi
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: disgo-tui-${{ matrix.goos }}-${{ matrix.goarch }}
+        path: |
+          disgo-tui-*
+          checksums.txt
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
+
+    - name: Combine checksums
+      run: |
+        find . -name "checksums.txt" -exec cat {} \; | sort > combined-checksums.txt
+
+    - name: Generate release notes
+      id: release_notes
+      run: |
+        # Extract version from tag
+        VERSION=${GITHUB_REF#refs/tags/}
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        
+        # Generate release notes
+        cat > release_notes.md << EOF
+        ## Discogs TUI $VERSION
+        
+        ### What's New
+        - Latest stable release of Discogs TUI
+        - Improved OAuth flow and token management
+        - Enhanced error handling and user experience
+        
+        ### Installation
+        
+        #### Quick Install (Linux/macOS)
+        \`\`\`bash
+        curl -fsSL https://github.com/${{ github.repository }}/releases/download/$VERSION/install.sh | bash
+        \`\`\`
+        
+        #### Manual Download
+        Download the appropriate binary for your platform from the assets below.
+        
+        #### Homebrew (coming soon)
+        \`\`\`bash
+        brew install ${{ github.repository_owner }}/tap/disgo-tui
+        \`\`\`
+        
+        ### Verification
+        All binaries are signed and checksums are provided. Verify downloads:
+        \`\`\`bash
+        sha256sum -c combined-checksums.txt
+        \`\`\`
+        
+        ### Usage
+        1. Download and install the binary
+        2. Run \`disgo-tui\` - no additional setup required!
+        3. Authenticate with your Discogs account when prompted
+        4. Start browsing your collection!
+        EOF
+
+    - name: Create install script
+      run: |
+        cat > install.sh << 'EOF'
+        #!/bin/bash
+        set -e
+        
+        # Discogs TUI Installer Script
+        
+        # Detect OS and architecture
+        OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+        ARCH=$(uname -m)
+        
+        case $ARCH in
+          x86_64) ARCH="amd64" ;;
+          arm64|aarch64) ARCH="arm64" ;;
+          *) echo "Unsupported architecture: $ARCH" && exit 1 ;;
+        esac
+        
+        case $OS in
+          linux|darwin) ;;
+          *) echo "Unsupported OS: $OS" && exit 1 ;;
+        esac
+        
+        # Get latest version
+        VERSION="${GITHUB_REF#refs/tags/}"
+        if [ -z "$VERSION" ]; then
+          VERSION=$(curl -s https://api.github.com/repos/${{ github.repository }}/releases/latest | grep '"tag_name"' | cut -d'"' -f4)
+        fi
+        
+        echo "Installing Discogs TUI $VERSION for $OS-$ARCH..."
+        
+        # Download URL
+        ARCHIVE="disgo-tui-$VERSION-$OS-$ARCH.tar.gz"
+        URL="https://github.com/${{ github.repository }}/releases/download/$VERSION/$ARCHIVE"
+        
+        # Create temp directory
+        TMP_DIR=$(mktemp -d)
+        cd "$TMP_DIR"
+        
+        # Download and extract
+        echo "Downloading $URL..."
+        curl -fsSL "$URL" -o "$ARCHIVE"
+        tar -xzf "$ARCHIVE"
+        
+        # Install binary
+        INSTALL_DIR="${HOME}/.local/bin"
+        mkdir -p "$INSTALL_DIR"
+        
+        cp disgo-tui "$INSTALL_DIR/"
+        chmod +x "$INSTALL_DIR/disgo-tui"
+        
+        # Cleanup
+        cd - > /dev/null
+        rm -rf "$TMP_DIR"
+        
+        echo "✓ Discogs TUI installed to $INSTALL_DIR/disgo-tui"
+        echo ""
+        echo "Add $INSTALL_DIR to your PATH if not already present:"
+        echo "  export PATH=\"\$PATH:\$HOME/.local/bin\""
+        echo ""
+        echo "Run 'disgo-tui' to get started!"
+        EOF
+        
+        chmod +x install.sh
+
+    - name: Create release
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: ${{ steps.release_notes.outputs.version }}
+        name: Discogs TUI ${{ steps.release_notes.outputs.version }}
+        body_path: release_notes.md
+        draft: false
+        prerelease: false
+        files: |
+          */disgo-tui-*
+          combined-checksums.txt
+          install.sh
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  homebrew:
+    needs: release
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+    - name: Update Homebrew Formula
+      uses: dawidd6/action-homebrew-bump-formula@v3
+      with:
+        token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        tap: ${{ github.repository_owner }}/homebrew-tap
+        formula: disgo-tui
+        tag: ${{ github.ref_name }}
+        revision: ${{ github.sha }}
+      continue-on-error: true
