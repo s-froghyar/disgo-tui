@@ -1,12 +1,16 @@
 package configs
 
 import (
+	_ "embed"
 	"log"
 
 	"github.com/knadh/koanf"
 	"github.com/knadh/koanf/parsers/yaml"
-	"github.com/knadh/koanf/providers/file"
+	"github.com/knadh/koanf/providers/rawbytes"
 )
+
+//go:embed conf.yaml
+var configYAML []byte
 
 // Global koanf instance. Use . as the key path delimiter. This can be / or anything.
 var (
@@ -25,8 +29,8 @@ type AppConfig struct {
 }
 
 func LoadConfig() (*AppConfig, error) {
-	// Load yaml config.
-	if err := k.Load(file.Provider("configs/conf.yaml"), parser); err != nil {
+	// Load yaml config from embedded bytes.
+	if err := k.Load(rawbytes.Provider(configYAML), parser); err != nil {
 		log.Fatalf("error loading config: %v", err)
 		return nil, err
 	}
